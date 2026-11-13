@@ -1,0 +1,14 @@
+{
+  "name": "agente-recuperacao-hubla",
+  "version": "1.0.0",
+  "description": "Agente de recuperação de vendas Hubla + WhatsApp + Grok",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0"
+  }
+}
