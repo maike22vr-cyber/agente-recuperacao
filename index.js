@@ -13,10 +13,8 @@ const {
   PORT = 3000
 } = process.env;
 
-// Armazena conversas simples em memória
 const conversations = new Map();
 
-// Mensagens iniciais aprovadas
 const MENSAGENS = {
   abandonado: (nome) =>
     `Oi ${nome}, aqui é a Thais da equipe da Suellen.\n\nVi que sua compra ficou pela metade e tem um detalhe do pagamento que precisa de atenção.\n\nPrefere que eu te mande o link de novo ou prefere me contar o que aconteceu?`,
@@ -28,20 +26,17 @@ const MENSAGENS = {
     `Oi ${nome}, aqui é a Thais da equipe da Suellen.\n\nSeu pedido de reembolso chegou aqui. Só preciso de uma confirmação rápida pra liberar.\n\nPode me confirmar por aqui?`
 };
 
-// Webhook verification (Meta)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('Webhook verificado');
     return res.status(200).send(challenge);
   }
   res.sendStatus(403);
 });
 
-// Recebe mensagens do WhatsApp
 app.post('/webhook', async (req, res) => {
   const body = req.body;
 
@@ -53,9 +48,6 @@ app.post('/webhook', async (req, res) => {
     if (message && message.type === 'text') {
       const from = message.from;
       const text = message.text.body;
-
-      console.log(`Mensagem de ${from}: ${text}`);
-
       const reply = await askGrok(from, text);
       await sendWhatsApp(from, reply);
     }
@@ -64,28 +56,18 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Webhook da Hubla
 app.post('/hubla', async (req, res) => {
   const event = req.body;
-  console.log('Evento Hubla:', event.type || event.event?.type);
-
   const type = event.type || event.event?.type;
   const phone = event.event?.lead?.phone || event.lead?.phone || event.event?.user?.phone;
   const name = event.event?.lead?.fullName || event.lead?.fullName || event.event?.user?.firstName || 'Cliente';
 
-  if (!phone) {
-    return res.sendStatus(200);
-  }
+  if (!phone) return res.sendStatus(200);
 
   let mensagem = null;
-
-  if (type === 'lead.abandoned_checkout') {
-    mensagem = MENSAGENS.abandonado(name);
-  } else if (type === 'invoice.payment_failed' || type === 'payment.failed') {
-    mensagem = MENSAGENS.cartao(name);
-  } else if (type === 'refund_request.created' || type === 'refund.created') {
-    mensagem = MENSAGENS.reembolso(name);
-  }
+  if (type === 'lead.abandoned_checkout') mensagem = MENSAGENS.abandonado(name);
+  else if (type === 'invoice.payment_failed' || type === 'payment.failed') mensagem = MENSAGENS.cartao(name);
+  else if (type === 'refund_request.created' || type === 'refund.created') mensagem = MENSAGENS.reembolso(name);
 
   if (mensagem) {
     setTimeout(async () => {
@@ -96,25 +78,16 @@ app.post('/hubla', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Endpoint de teste manual
 app.get('/teste', (req, res) => {
   const tipo = (req.query.tipo || 'abandonado').toLowerCase();
   const nome = req.query.nome || 'Maria';
-
   const fn = MENSAGENS[tipo] || MENSAGENS.abandonado;
-  const mensagem = fn(nome);
-
-  res.json({
-    tipo,
-    nome,
-    mensagem
-  });
+  res.json({ tipo, nome, mensagem: fn(nome) });
 });
 
 app.post('/teste-resposta', async (req, res) => {
   const { userId = 'teste', mensagem } = req.body;
   if (!mensagem) return res.status(400).json({ erro: 'mande a mensagem no body' });
-
   const reply = await askGrok(userId, mensagem);
   res.json({ userId, sua_mensagem: mensagem, resposta_thais: reply });
 });
@@ -145,14 +118,35 @@ Você fala como alguém da equipe, próxima e humana. Tom direto e natural, sem 
 - Sem aberturas genéricas.
 
 ## Como conduzir
-- Sempre leia o que a pessoa já falou antes de responder. Não repita pergunta que ela já respondeu.
-- Se ela já explicou o problema (erro no cartão, falta de limite, dúvida, etc.), não pergunte de novo. Avance para a solução.
-- Quando a pessoa pedir o link, disser que perdeu, ou quiser finalizar, mande o link na hora. Não peça e-mail só para isso.
-- Ofereça PIX como alternativa quando o cartão der erro.
+- Sempre leia o que a pessoa já falou. Não repita pergunta que ela já respondeu.
+- Se ela já explicou o problema, avance. Não pergunte de novo.
+- Quando pedir o link ou quiser finalizar, mande o link na hora.
+- Ofereça PIX quando o cartão der erro.
+- Se ela pedir exemplo, dê um exemplo real e curto. Não fale sobre o exemplo.
 
-## Links (use quando fizer sentido)
+## Links
 - Checkout direto: https://pay.hub.la/I4mj0BRRyCfFk2l2mRl8
-- Página de vendas (só se ela ainda tiver dúvida grande): https://www.maquinadevendasporwhatsapp.com.br/
+- Página de vendas (só se ainda tiver dúvida grande): https://www.maquinadevendasporwhatsapp.com.br/
+
+## Exemplos de como responder
+
+Pessoa: "deu erro no cartão"
+Thais: "Entendi. Quer tentar por PIX? Te mando o link direto."
+
+Pessoa: "manda o link"
+Thais: "Aqui o link: https://pay.hub.la/I4mj0BRRyCfFk2l2mRl8"
+
+Pessoa: "ainda estou na dúvida se é pra mim"
+Thais: "O que mais te deixa em dúvida?"
+
+Pessoa: "se vou conseguir fazer / se funciona pra mim"
+Thais: "Muita gente começa improvisando nas respostas. O método organiza isso pra converter mais. Quer ver um exemplo rápido?"
+
+Pessoa: "qual exemplo?" ou "cade o exemplo?"
+Thais: "Exemplo: a pessoa diz que improvisa. Você responde: 'Entendi, muita gente começa assim. O método te dá respostas prontas pra converter mais.' Faz sentido pra você?"
+
+Pessoa: "eu improviso mesmo"
+Thais: "Entendi. O método ajuda justamente a organizar essas respostas improvisadas pra fechar mais. Quer o link pra ver como funciona?"
 
 ## Regras importantes
 - Nunca chame para ligação.
@@ -160,7 +154,8 @@ Você fala como alguém da equipe, próxima e humana. Tom direto e natural, sem 
 - Não fique pedindo e-mail sem necessidade.
 - Se não souber algo, diga que vai verificar com a equipe da Suellen.
 - Se a pessoa já comprou ou o reembolso já foi processado, não force venda.
-- Responda curto e direto. Não repita informação já dita na conversa.`
+- Responda curto e direto. Não repita informação já dita.
+- Não fique em loop. Depois de dar valor, ofereça o próximo passo.`
           },
           ...history.slice(-6)
         ],
@@ -201,7 +196,6 @@ async function sendWhatsApp(to, text) {
         }
       }
     );
-    console.log(`Mensagem enviada para ${to}`);
   } catch (err) {
     console.error('Erro WhatsApp:', err.response?.data || err.message);
   }
