@@ -7,7 +7,7 @@ const dotenv = require('dotenv');
 const express = require('express');
 const axios = require('axios');
 
-// Lê tokens.env se existir; senão .env (no Render/Railway as variáveis já vêm do painel)
+// Lê tokens.env se existir; senão .env (no Render as variáveis já vêm do painel)
 dotenv.config({ path: fs.existsSync('./tokens.env') ? './tokens.env' : './.env' });
 
 const {
@@ -26,12 +26,15 @@ const {
   TEMPLATE_ABANDONADO,           // nomes dos templates aprovados na Meta (opcional)
   TEMPLATE_CARTAO,
   TEMPLATE_REEMBOLSO,
+  TEMPLATE_PIX,
   TEMPLATE_IDIOMA = 'pt_BR',
+  PIX_LEMBRETE_MS = String(15 * 60 * 1000),   // lembrete do PIX gerado e não pago
   PORT = 3000
 } = process.env;
 
 const ESPERA = Number(ESPERA_MS);
 const ATRASO_HUBLA = Number(ATRASO_HUBLA_MS);
+const PIX_LEMBRETE = Number(PIX_LEMBRETE_MS);
 
 // ---------------------------------------------------------------------------
 // Produto (mude aqui e o prompt atualiza sozinho)
@@ -82,6 +85,8 @@ function atualizarSinais(st, texto) {
   if (/(manda|me passa|quero) o link|vou pagar|to com o app|t[oô] com o app|fecho (agora|hoje)|pago agora/.test(t)) st.sinais.semLink = false;
   if (/(nome sujo|devendo|d[ií]vida|desempregad|internad|hospital|faleceu|luto|doente)/.test(t)) st.sinais.sensivel = true;
   if (/(j[aá] paguei|acabei de pagar|paguei o pix|n[aã]o recebi (o )?acesso|reembolso|estorno)/.test(t)) st.sinais.suporte = true;
+  const nomeDito = t.match(/(?:meu nome [eé]|me chamo)\s+([a-záéíóúâêôãõç]{2,})/);
+  if (nomeDito) st.perfil.nome = nomeDito[1][0].toUpperCase() + nomeDito[1].slice(1);
   const limite = t.match(/limite[^0-9]{0,25}(\d{2,5})/);
   if (limite) st.perfil.limite = Number(limite[1]);
 }
@@ -123,6 +128,17 @@ ERRO NO CARTÃO ("transação não autorizada", "recusado", "deu erro")
 5. Se falhar 2 vezes, ou a pessoa disser que vai desistir: não deixe ir embora com "o link tá aí". Ofereça o suporte humano no ${SUPORTE} e pergunte quando ela consegue tentar de novo.
 Nunca responda o erro de cartão só com "quer tentar por PIX?" ou só com o link.
 Pagamento com 2 cartões: diga que essa informação você não tem e que o suporte confirma.
+
+PIX GERADO E NÃO PAGO, OU PIX EXPIRADO
+Quem gerou o PIX já decidiu comprar. É o lead mais quente: resolva rápido e sem enrolar.
+1. Se a pessoa quer pagar: mande o link na hora para gerar um PIX novo (o código antigo não serve mais depois que expira). Diga que leva 1 minuto.
+2. Se não pagou, descubra o motivo com uma pergunta curta. Causas comuns:
+   a) Limite do PIX do banco (muitos bancos limitam o PIX à noite, das 20h às 6h, em R$ 1.000 ou menos). Solução: aumentar o limite no app do banco ou pagar no cartão.
+   b) Sem saldo agora: ofereça cartão em ${PRODUTO.parcelas}x de ${reais(PRODUTO.parcela)} ou combinar um dia para pagar.
+   c) Copiou o código errado ou o app do banco deu erro: gerar um PIX novo resolve.
+   d) Insegurança na hora de pagar: lembre da garantia de ${PRODUTO.garantiaDias} dias e que o acesso chega por e-mail assim que o pagamento é aprovado.
+3. Pagou e o sistema ainda mostra como não pago: não diga que vai verificar. "O PIX costuma confirmar em poucos minutos. Se passar de 30 minutos, manda o comprovante pro suporte no ${SUPORTE}."
+4. Boleto vencido: o boleto antigo não vale mais. Ofereça gerar outro, ou pagar no PIX ou no cartão, que liberam o acesso na hora.
 
 CONDUÇÃO
 - Leia o histórico inteiro antes de responder. Nunca ofereça de novo algo que a pessoa já recusou. Nunca repita uma mensagem que você já mandou.
@@ -361,22 +377,66 @@ const MENSAGENS = {
     `Oi ${nome}, aqui é a Thais, assistente virtual da equipe da Suellen.\n\nVi que sua compra da Máquina de Vendas ficou pela metade. Aconteceu alguma coisa no pagamento ou ficou alguma dúvida?`,
   cartao: (nome) =>
     `Oi ${nome}, aqui é a Thais, assistente virtual da equipe da Suellen.\n\nVi que o pagamento no cartão não passou. Isso quase sempre se resolve rápido. Me conta o que apareceu na tela?`,
+  pixPendente: (nome) =>
+    `Oi ${nome}, aqui é a Thais, assistente virtual da equipe da Suellen.\n\nVi que você gerou o PIX da Máquina de Vendas mas ele ainda não foi pago. Travou em alguma coisa na hora de pagar?`,
+  pixExpirado: (nome) =>
+    `Oi ${nome}, aqui é a Thais, assistente virtual da equipe da Suellen.\n\nO PIX que você gerou pra Máquina de Vendas expirou antes do pagamento. Quer que eu te mande o link pra gerar um novo? Leva 1 minutinho.`,
+  boletoVencido: (nome) =>
+    `Oi ${nome}, aqui é a Thais, assistente virtual da equipe da Suellen.\n\nO boleto da Máquina de Vendas venceu sem pagamento. Quer que eu te mande o link pra gerar outro, ou prefere pagar no PIX ou cartão?`,
   reembolso: (nome) =>
     `Oi ${nome}, aqui é a Thais, assistente virtual da equipe da Suellen.\n\nVi seu pedido de reembolso. Quem cuida disso é o suporte no ${SUPORTE}. Se quiser, me conta o que não funcionou pra você, isso ajuda a equipe a melhorar.`
 };
 
-const EVENTOS = {
-  'lead.abandoned_checkout': 'abandonado',
-  'invoice.payment_failed': 'cartao',
-  'payment.failed': 'cartao',
-  'refund_request.created': 'reembolso',
-  'refund.created': 'reembolso'
+const DESCRICAO = {
+  abandonado: 'abandonou o checkout',
+  cartao: 'pagamento no cartão recusado',
+  pixPendente: 'gerou o PIX e ainda não pagou',
+  pixExpirado: 'gerou o PIX e deixou expirar sem pagar',
+  boletoVencido: 'boleto venceu sem pagamento',
+  reembolso: 'pediu reembolso'
 };
-const DESCRICAO = { abandonado: 'abandonou o checkout', cartao: 'pagamento no cartão recusado', reembolso: 'pediu reembolso' };
-const TEMPLATES = { abandonado: TEMPLATE_ABANDONADO, cartao: TEMPLATE_CARTAO, reembolso: TEMPLATE_REEMBOLSO };
-const COMPRA_OK = /(payment_succeeded|paid|approved|succeeded|completed|subscription\.activated)/i;
+const TEMPLATES = {
+  abandonado: TEMPLATE_ABANDONADO,
+  cartao: TEMPLATE_CARTAO,
+  pixPendente: TEMPLATE_PIX,
+  pixExpirado: TEMPLATE_PIX,
+  boletoVencido: TEMPLATE_PIX,
+  reembolso: TEMPLATE_REEMBOLSO
+};
+// Quanto tempo esperar antes de mandar cada mensagem
+const ATRASOS = {
+  abandonado: ATRASO_HUBLA,
+  cartao: ATRASO_HUBLA,
+  pixPendente: PIX_LEMBRETE,   // lembrete se o PIX gerado não for pago
+  pixExpirado: 60 * 1000,      // já expirou: manda logo
+  boletoVencido: 60 * 1000,
+  reembolso: ATRASO_HUBLA
+};
 
-const agendados = new Map();   // tel -> timeout
+// Eventos documentados em hubla.gitbook.io/docs/webhooks/eventos
+// invoice.expired = fatura venceu sem ser cartão (PIX ou boleto); o método vem em event.invoice.paymentMethod
+function motivoDoEvento(tipo, invoice) {
+  const metodo = invoice?.paymentMethod;
+  if (tipo === 'lead.abandoned_checkout') return 'abandonado';
+  if (tipo === 'invoice.payment_failed') return 'cartao';
+  if (tipo === 'invoice.expired') {
+    if (metodo === 'pix') return 'pixExpirado';
+    if (metodo === 'bank_slip') return 'boletoVencido';
+    return null;
+  }
+  if (tipo === 'invoice.created' && metodo === 'pix' && (invoice?.status || 'unpaid') === 'unpaid') return 'pixPendente';
+  if (tipo === 'refund_request.created') return 'reembolso';
+  return null;
+}
+
+function comprou(tipo, invoice) {
+  return tipo === 'invoice.payment_succeeded' ||
+    (tipo === 'invoice.status_updated' && invoice?.status === 'paid') ||
+    tipo === 'subscription.activated';
+}
+
+const agendados = new Map();   // tel -> { timer, motivo }
+const eventosHubla = new Set(); // a Hubla pode mandar o mesmo evento mais de uma vez
 
 function normalizarTelefone(bruto) {
   let n = String(bruto || '').replace(/\D/g, '');
@@ -388,34 +448,47 @@ app.post('/hubla', (req, res) => {
   res.sendStatus(200);
   if (!veioDaHubla(req)) return console.warn('Webhook da Hubla com token inválido, ignorado.');
 
+  const idEvento = req.get('x-hubla-idempotency');
+  if (idEvento) {
+    if (eventosHubla.has(idEvento)) return;
+    eventosHubla.add(idEvento);
+    if (eventosHubla.size > 5000) eventosHubla.delete(eventosHubla.values().next().value);
+  }
+
   const ev = req.body || {};
   const tipo = ev.type || ev.event?.type || '';
-  const pessoa = ev.event?.lead || ev.lead || ev.event?.user || ev.user || {};
-  const tel = normalizarTelefone(pessoa.phone);
-  const nome = (pessoa.firstName || pessoa.fullName || 'tudo bem').split(' ')[0];
+  const invoice = ev.event?.invoice;
+  const pessoa = invoice?.payer || ev.event?.lead || ev.lead || ev.event?.user || ev.user || {};
+  const tel = normalizarTelefone(pessoa.phone || ev.event?.user?.phone);
+  const nome = (pessoa.firstName || pessoa.fullName || ev.event?.user?.firstName || 'tudo bem').split(' ')[0];
 
-  console.log(`Hubla: evento "${tipo}" para ${tel || 'sem telefone'}`);
+  console.log(`Hubla: evento "${tipo}"${invoice?.paymentMethod ? ` (${invoice.paymentMethod}, ${invoice.status})` : ''} para ${tel || 'sem telefone'}`);
   if (!tel) return;
 
   // Comprou: cancela qualquer mensagem de recuperação que estava agendada
-  if (COMPRA_OK.test(tipo)) {
-    clearTimeout(agendados.get(tel));
+  if (comprou(tipo, invoice)) {
+    clearTimeout(agendados.get(tel)?.timer);
     agendados.delete(tel);
     estado(tel).sinais.comprou = true;
     return;
   }
 
-  const motivo = EVENTOS[tipo];
+  const motivo = motivoDoEvento(tipo, invoice);
   if (!motivo) return;
 
-  clearTimeout(agendados.get(tel));
-  agendados.set(tel, setTimeout(async () => {
+  // invoice.created pode chegar repetido: não reinicia o lembrete do mesmo PIX
+  const atual = agendados.get(tel);
+  if (atual && atual.motivo === motivo && motivo === 'pixPendente') return;
+  clearTimeout(atual?.timer);
+
+  const timer = setTimeout(async () => {
     agendados.delete(tel);
     const st = estado(tel);
     if (st.sinais.comprou) return;
 
     st.perfil.nome = st.perfil.nome || nome;
     st.perfil.evento = DESCRICAO[motivo];
+    st.sinais.metodo = invoice?.paymentMethod || st.sinais.metodo;
     const texto = MENSAGENS[motivo](st.perfil.nome);
 
     // Primeiro tenta texto (funciona se o lead falou com o número nas últimas 24h);
@@ -423,7 +496,8 @@ app.post('/hubla', (req, res) => {
     let ok = await enviarTexto(tel, texto);
     if (!ok && TEMPLATES[motivo]) ok = await enviarTemplate(tel, TEMPLATES[motivo], st.perfil.nome);
     if (ok) guardar(st, 'assistant', texto);   // assim a Thais sabe o que ela mesma mandou
-  }, ATRASO_HUBLA));
+  }, ATRASOS[motivo]);
+  agendados.set(tel, { timer, motivo });
 });
 
 // ---------------------------------------------------------------------------
